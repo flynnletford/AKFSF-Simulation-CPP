@@ -92,7 +92,80 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
         BeaconData map_beacon = map.getBeaconWithId(meas.id); // Match Beacon with built in Data Association Id
         if (meas.id != -1 && map_beacon.id != -1) // Check that we have a valid beacon match
         {
-           
+            int n_x = state.size();
+            int n_z = 2;
+
+            // Measurement Vector
+            VectorXd z = VectorXd::Zero(n_z);
+            z << meas.range, meas.theta;
+
+            // Noise Covariance Matrix
+            MatrixXd R = MatrixXd::Zero(n_z,n_z);
+            R(0,0) = LIDAR_RANGE_STD*LIDAR_RANGE_STD;
+            R(1,1) = LIDAR_THETA_STD*LIDAR_THETA_STD;
+
+            // Augment the State Vector with Noise States
+            int n_aug = n_x + n_z;
+
+            VectorXd x_aug = VectorXd::Zero(n_aug);
+            x_aug.head(n_x) = state;
+
+            // Augment the Covariance Matrix with Noise States
+            MatrixXd P_aug = MatrixXd::Zero(n_aug, n_aug);
+            P_aug.topLeftCorner(n_x,n_x) = cov;
+            P_aug.bottomRightCorner(n_z,n_z) = R;
+
+            // Generate sigma points
+            std::vector<VectorXd> x_sig = generateSigmaPoints(x_aug, P_aug);
+            std::vector<double> weights_sig = generateSigmaWeights(n_aug);
+
+            // Transform sigma points with LiDAR measurement model.
+            std::vector<VectorXd> z_sig;
+            for (const auto& x : x_sig) {
+                double Lx = map_beacon.x;
+                double Ly = map_beacon.y;
+                double rangeNoise = x[4];
+                double headingNoise = x[5];
+
+                double deltaX = Lx - x[0];
+                double deltaY = Ly - x[1];
+
+                double rangeHat = sqrt(deltaX*deltaX + deltaY*deltaY) + rangeNoise;
+                double headingHat = atan2(deltaY, deltaX) - x[2] + headingNoise;
+
+                VectorXd z_hat = VectorXd::Zero(n_z);
+                z_hat << rangeHat, headingHat;
+                z_sig.push_back(z_hat);
+            }
+            
+            // Calculate Measurement Mean
+            VectorXd z_mean = VectorXd::Zero(n_z);
+            for(unsigned int i = 0; i < z_sig.size(); ++i){z_mean += weights_sig[i] * z_sig[i];}
+
+            // Calculate Innovation Covariance
+            MatrixXd S = MatrixXd::Zero(n_z,n_z);
+            for(unsigned int i = 0; i < z_sig.size(); ++i)
+            {
+                VectorXd diff = normaliseState(z_sig[i] - z_mean);
+                S += weights_sig[i] * diff * diff.transpose();
+            }
+
+            // Calculate the Cross Covariance
+            MatrixXd Pxz = MatrixXd::Zero(n_x, n_z);
+            for (int i = 0; i < z_sig.size(); i++) {
+                VectorXd x_diff = normaliseState(x_sig[i]  - x_aug);
+                VectorXd z_diff = normaliseState(z_sig[i]  - z_mean);
+                Pxz += weights_sig[i] * x_diff * z_diff.transpose();
+            }
+
+            // Implement the UKF Update step equations
+            VectorXd measurementInnovation = normaliseState(z - z_mean);
+            MatrixXd K = Pxz*S.inverse();
+            VectorXd new_x_aug = x_aug + K*measurementInnovation;
+            MatrixXd new_P_aug = P_aug - K*S*K.transpose();
+
+            state = new_x_aug.head(n_x);
+            cov = new_P_aug.topLeftCorner(n_z, n_z);
 
         }
         // ----------------------------------------------------------------------- //
@@ -163,7 +236,6 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
             sigmaPointPredicted(3,0) = newV;
 
             sigma_points_predict.push_back(normaliseState(sigmaPointPredicted));
-
         }
 
         // Calculate mean of transformed sigma points.
@@ -177,10 +249,7 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
         for (int i = 0; i < sigma_points_predict.size(); i++) {
             VectorXd diff = normaliseState(sigma_points_predict[i] - state);
             cov += sigmaWeights[i]* diff * diff.transpose(); 
-        }
-
-
-    
+        }    
 
         // ----------------------------------------------------------------------- //
 

@@ -72,6 +72,12 @@ VectorXd normaliseState(VectorXd state)
     return state;
 }
 
+VectorXd normaliseLidarMeasurement(VectorXd meas)
+{
+    meas(1) = wrapAngle(meas(1));
+    return meas;
+}
+
 // ----------------------------------------------------------------------- //
 
 void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap& map)
@@ -115,9 +121,14 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
             P_aug.topLeftCorner(n_x,n_x) = cov;
             P_aug.bottomRightCorner(n_z,n_z) = R;
 
+            std::cout << "A" << std::endl;
+
             // Generate sigma points
             std::vector<VectorXd> x_sig = generateSigmaPoints(x_aug, P_aug);
             std::vector<double> weights_sig = generateSigmaWeights(n_aug);
+
+            std::cout << "B" << std::endl;
+
 
             // Transform sigma points with LiDAR measurement model.
             std::vector<VectorXd> z_sig;
@@ -135,38 +146,64 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
 
                 VectorXd z_hat = VectorXd::Zero(n_z);
                 z_hat << rangeHat, headingHat;
-                z_sig.push_back(z_hat);
+                z_sig.push_back(normaliseLidarMeasurement(z_hat));
             }
+
+            std::cout << "C" << std::endl;
+
             
             // Calculate Measurement Mean
             VectorXd z_mean = VectorXd::Zero(n_z);
-            for(unsigned int i = 0; i < z_sig.size(); ++i){z_mean += weights_sig[i] * z_sig[i];}
+            for(unsigned int i = 0; i < z_sig.size(); i++){z_mean += weights_sig[i] * z_sig[i];}
+
+            std::cout << "C1" << std::endl;
+
 
             // Calculate Innovation Covariance
             MatrixXd S = MatrixXd::Zero(n_z,n_z);
+            std::cout << "n_z: " << n_z << ", n_aug: " << n_aug << ", z_sig.size(): " << z_sig.size() << ", z_sig[0]: " << z_sig[0] << std::endl;
+            std::cout << "*** z_sig[i] - z_mean = " << z_sig[0] - z_mean << std::endl;
             for(unsigned int i = 0; i < z_sig.size(); ++i)
             {
-                VectorXd diff = normaliseState(z_sig[i] - z_mean);
+                VectorXd diff = normaliseLidarMeasurement(z_sig[i] - z_mean);
+                std::cout << "diff: " << diff << std::endl;
                 S += weights_sig[i] * diff * diff.transpose();
             }
 
+            std::cout << "D" << std::endl;
+
             // Calculate the Cross Covariance
-            MatrixXd Pxz = MatrixXd::Zero(n_x, n_z);
+            MatrixXd Pxz = MatrixXd::Zero(n_aug, n_z);
             for (int i = 0; i < z_sig.size(); i++) {
                 VectorXd x_diff = normaliseState(x_sig[i]  - x_aug);
-                VectorXd z_diff = normaliseState(z_sig[i]  - z_mean);
+                VectorXd z_diff = normaliseLidarMeasurement(z_sig[i]  - z_mean);
                 Pxz += weights_sig[i] * x_diff * z_diff.transpose();
             }
 
+            std::cout << "E" << std::endl;
+
             // Implement the UKF Update step equations
-            VectorXd measurementInnovation = normaliseState(z - z_mean);
+            VectorXd measurementInnovation = normaliseLidarMeasurement(z - z_mean);
+            std::cout << "F" << std::endl;
             MatrixXd K = Pxz*S.inverse();
+            std::cout << "G" << std::endl;
             VectorXd new_x_aug = x_aug + K*measurementInnovation;
+            std::cout << "H" << std::endl;
+            std::cout << "K*S*K.transpose() = \n" << K*S*K.transpose() << std::endl;
+            std::cout << "P_aug = \n" << P_aug << std::endl;
+
             MatrixXd new_P_aug = P_aug - K*S*K.transpose();
+            std::cout << "I" << std::endl;
+
+            std::cout << "state before update = \n" << state << std::endl;
+            std::cout << "cov before update = \n" << cov << std::endl;
+
 
             state = new_x_aug.head(n_x);
-            cov = new_P_aug.topLeftCorner(n_z, n_z);
+            std::cout << "J" << std::endl;
 
+            cov = new_P_aug.topLeftCorner(n_x, n_x);
+            std::cout << "K" << std::endl;
         }
         // ----------------------------------------------------------------------- //
 

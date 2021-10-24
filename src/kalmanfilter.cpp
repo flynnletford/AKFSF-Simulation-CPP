@@ -1,16 +1,19 @@
 // ------------------------------------------------------------------------------- //
 // Advanced Kalman Filtering and Sensor Fusion Course - Unscented Kalman Filter
 //
-// ####### STUDENT FILE #######
-//
-// Usage:
-// -Rename this file to "kalmanfilter.cpp" if you want to use this code.
+
+// Notes on using the Unscented Kalman Filter (UKF):
+// 1. Just like the EKF, the UKF is not guaranteed to converge.
+// 2. UKF can diverge if the state is too far away from the truth as it still uses an approximation of the system.
+// 3. To avoid convergence issues, try to initialise the full state and covariance from measurement data. 
+//    Assuming zero with large uncertainty can lead to issues. The handleGPSMeasurement function provides an example
+//    of initialising the position state values as well as the covariance matrix with default noise values. However,
+//    the initial velocity and heading values are not set. If the UKF were to be started with the real-world system
+//    having non-zero values for these two parameters, errors are to be expected.
 
 #include "kalmanfilter.h"
 #include "utils.h"
 
-// -------------------------------------------------- //
-// YOU CAN USE AND MODIFY THESE CONSTANTS HERE
 constexpr double ACCEL_STD = 0.05;
 constexpr double GYRO_STD = 0.01/180.0 * M_PI;
 constexpr double INIT_VEL_STD = 2;
@@ -18,12 +21,10 @@ constexpr double INIT_PSI_STD = 5.0/180.0 * M_PI;
 constexpr double GPS_POS_STD = 3.0;
 constexpr double LIDAR_RANGE_STD = 3.0;
 constexpr double LIDAR_THETA_STD = 0.02;
-// -------------------------------------------------- //
 
-// ----------------------------------------------------------------------- //
-// USEFUL HELPER FUNCTIONS
-
-
+// The sigma points allow us to capture the distributions shape with a minimum number of points.
+// Sigma points are based on the square root of the covariance, hence the name "sigma".
+// For a state vector of dimensions n x 1, we generate 2n + 1 sigma points.
 std::vector<VectorXd> generateSigmaPoints(VectorXd state, MatrixXd cov) {
     std::vector<VectorXd> sigmaPoints;
 
@@ -35,6 +36,9 @@ std::vector<VectorXd> generateSigmaPoints(VectorXd state, MatrixXd cov) {
     sigmaPoints.push_back(x0);
 
     MatrixXd newCov = (numStates+k)*cov;
+
+    // We can calculate the square root of a real positive definite matrix using the Cholesky Decomposition.
+    // llt() represents the equation L*L.transpose(). The matrix L is the square root of the original matrix.
     MatrixXd sqrtCov = newCov.llt().matrixL();
 
     for(int i = 0; i < numStates; ++i)
@@ -51,7 +55,7 @@ std::vector<VectorXd> generateSigmaPoints(VectorXd state, MatrixXd cov) {
 std::vector<double> generateSigmaWeights(unsigned int numStates) {
     std::vector<double> weights;
 
-
+    // For a Gaussian distribution, the following weight has been shown to improve the accuracy.
     double k = 3.0 - numStates;
 
     double W0 = k/(numStates + k);
@@ -78,7 +82,6 @@ VectorXd normaliseLidarMeasurement(VectorXd meas)
     return meas;
 }
 
-// ----------------------------------------------------------------------- //
 
 void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap& map)
 {
@@ -219,22 +222,19 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
         VectorXd state = getState();
         MatrixXd cov = getCovariance();
 
-        // Implement The Kalman Filter Prediction Step for the system in the  
-        // section below.
-        // Hint: You can use the constants: ACCEL_STD, GYRO_STD
-        // HINT: use the wrapAngle() function on angular values to always keep angle
-        // values within correct range, otherwise strange angle effects might be seen.
-        // ----------------------------------------------------------------------- //
-        // ENTER YOUR CODE HERE
+        // STEP 1: Augment the state vector and covariance matrix with noise.
+
+        // Augment the state vector.
         MatrixXd Q = Matrix2d::Zero();
         Q(0,0) = dt*GYRO_STD*GYRO_STD;
         Q(1,1) = dt*ACCEL_STD*ACCEL_STD;
 
-        // Augment the state vector.
         int n_x = state.size();
         int aug_size = 2;
         int x_aug_size = n_x+aug_size;
 
+        // Our augmented state will just be the state vector with [0; 0] appended as we assume a noise distribution
+        // with zero mean for both gyroscope noise, and process model acceleration noise.
         VectorXd x_aug = VectorXd::Zero(x_aug_size);
         x_aug.head(n_x) = state;
 
@@ -244,11 +244,13 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
         cov_aug.bottomRightCorner(aug_size, aug_size) = Q;
 
         
-        // Generate Sigma Points
+        // STEP 2: Generate Sigma Points
         std::vector<VectorXd> sigmaPoints = generateSigmaPoints(x_aug, cov_aug);
-        std::vector<double> sigmaWeights = generateSigmaWeights(x_aug_size);
 
-        // Transform Sigma Points with Process Model
+        // STEP 3: Transform Sigma Points with Process Model
+
+        // This has the effect of predicting the states forward in time using the process model.
+        // The transformed sigma points provide a prediction of the Gaussian distribution for the next time step.
         std::vector<VectorXd> sigma_points_predict;
         for (const auto& sigma_point : sigmaPoints)
         {
@@ -256,8 +258,12 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
             double y = sigma_point(1);
             double psi = sigma_point(2);
             double V = sigma_point(3);
+
+            // Our model assume the input is the turn rate of the vehicle as measured by a gryoscope.
             double psi_dot = gyro.psi_dot;
             double psi_dot_noise = sigma_point(4);
+
+            // We assume that the acceleration is unknown and so is modelled by process noise as a random variable.
             double accel_noise = sigma_point(5);
 
             // Predict using process model
@@ -275,20 +281,24 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
             sigma_points_predict.push_back(normaliseState(sigmaPointPredicted));
         }
 
-        // Calculate mean of transformed sigma points.
+        // STEP 4: Calculate the mean and covariance of transformed sigma points.
+
+        // 4a) We need the sigma weights for these calculations.
+        std::vector<double> sigmaWeights = generateSigmaWeights(x_aug_size);
+
+
+        // 4b) Calculate mean of transformed sigma points.
         state = VectorXd::Zero(n_x);
         for (int i = 0; i < sigma_points_predict.size(); i++) {
             state += sigmaWeights[i]*sigma_points_predict[i];
         }
 
-        // Calculate covariance of transformed sigma points.
+        // 4c) Calculate covariance of transformed sigma points.
         cov = MatrixXd::Zero(n_x, n_x);
         for (int i = 0; i < sigma_points_predict.size(); i++) {
             VectorXd diff = normaliseState(sigma_points_predict[i] - state);
             cov += sigmaWeights[i]* diff * diff.transpose(); 
         }    
-
-        // ----------------------------------------------------------------------- //
 
         setState(state);
         setCovariance(cov);

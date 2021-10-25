@@ -14,10 +14,10 @@
 #include "kalmanfilter.h"
 #include "utils.h"
 
-constexpr double ACCEL_STD = 0.05;
+constexpr double ACCEL_STD = 1.0;
 constexpr double GYRO_STD = 0.01/180.0 * M_PI;
-constexpr double INIT_VEL_STD = 2;
-constexpr double INIT_PSI_STD = 5.0/180.0 * M_PI;
+constexpr double INIT_VEL_STD = 10.0;
+constexpr double INIT_PSI_STD = 45.0/180.0 * M_PI;
 constexpr double GPS_POS_STD = 3.0;
 constexpr double LIDAR_RANGE_STD = 3.0;
 constexpr double LIDAR_THETA_STD = 0.02;
@@ -124,14 +124,9 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
             P_aug.topLeftCorner(n_x,n_x) = cov;
             P_aug.bottomRightCorner(n_z,n_z) = R;
 
-            std::cout << "A" << std::endl;
-
             // Generate sigma points
             std::vector<VectorXd> x_sig = generateSigmaPoints(x_aug, P_aug);
             std::vector<double> weights_sig = generateSigmaWeights(n_aug);
-
-            std::cout << "B" << std::endl;
-
 
             // Transform sigma points with LiDAR measurement model.
             std::vector<VectorXd> z_sig;
@@ -151,31 +146,22 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
                 z_hat << rangeHat, headingHat;
                 z_sig.push_back(normaliseLidarMeasurement(z_hat));
             }
-
-            std::cout << "C" << std::endl;
-
-            
+           
             // Calculate Measurement Mean
             VectorXd z_mean = VectorXd::Zero(n_z);
             for(unsigned int i = 0; i < z_sig.size(); i++){z_mean += weights_sig[i] * z_sig[i];}
 
-            std::cout << "C1" << std::endl;
-
-
             // Calculate Innovation Covariance
+            // This represents how much uncertainty there is inside the measurement.
             MatrixXd S = MatrixXd::Zero(n_z,n_z);
-            std::cout << "n_z: " << n_z << ", n_aug: " << n_aug << ", z_sig.size(): " << z_sig.size() << ", z_sig[0]: " << z_sig[0] << std::endl;
-            std::cout << "*** z_sig[i] - z_mean = " << z_sig[0] - z_mean << std::endl;
-            for(unsigned int i = 0; i < z_sig.size(); ++i)
+            for(unsigned int i = 0; i < z_sig.size(); i++)
             {
                 VectorXd diff = normaliseLidarMeasurement(z_sig[i] - z_mean);
-                std::cout << "diff: " << diff << std::endl;
                 S += weights_sig[i] * diff * diff.transpose();
             }
 
-            std::cout << "D" << std::endl;
-
             // Calculate the Cross Covariance
+            // This represents how much uncertainty there is between the state and the measurement.
             MatrixXd Pxz = MatrixXd::Zero(n_aug, n_z);
             for (int i = 0; i < z_sig.size(); i++) {
                 VectorXd x_diff = normaliseState(x_sig[i]  - x_aug);
@@ -183,30 +169,15 @@ void KalmanFilter::handleLidarMeasurement(LidarMeasurement meas, const BeaconMap
                 Pxz += weights_sig[i] * x_diff * z_diff.transpose();
             }
 
-            std::cout << "E" << std::endl;
-
             // Implement the UKF Update step equations
             VectorXd measurementInnovation = normaliseLidarMeasurement(z - z_mean);
-            std::cout << "F" << std::endl;
             MatrixXd K = Pxz*S.inverse();
-            std::cout << "G" << std::endl;
             VectorXd new_x_aug = x_aug + K*measurementInnovation;
-            std::cout << "H" << std::endl;
-            std::cout << "K*S*K.transpose() = \n" << K*S*K.transpose() << std::endl;
-            std::cout << "P_aug = \n" << P_aug << std::endl;
 
             MatrixXd new_P_aug = P_aug - K*S*K.transpose();
-            std::cout << "I" << std::endl;
-
-            std::cout << "state before update = \n" << state << std::endl;
-            std::cout << "cov before update = \n" << cov << std::endl;
-
 
             state = new_x_aug.head(n_x);
-            std::cout << "J" << std::endl;
-
             cov = new_P_aug.topLeftCorner(n_x, n_x);
-            std::cout << "K" << std::endl;
         }
         // ----------------------------------------------------------------------- //
 
@@ -226,26 +197,26 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
 
         // Augment the state vector.
         MatrixXd Q = Matrix2d::Zero();
-        Q(0,0) = dt*GYRO_STD*GYRO_STD;
-        Q(1,1) = dt*ACCEL_STD*ACCEL_STD;
+        Q(0,0) = GYRO_STD*GYRO_STD;
+        Q(1,1) = ACCEL_STD*ACCEL_STD;
 
         int n_x = state.size();
-        int aug_size = 2;
-        int x_aug_size = n_x+aug_size;
+        int n_w = 2;
+        int n_aug = n_x+n_w;
 
         // Our augmented state will just be the state vector with [0; 0] appended as we assume a noise distribution
         // with zero mean for both gyroscope noise, and process model acceleration noise.
-        VectorXd x_aug = VectorXd::Zero(x_aug_size);
+        VectorXd x_aug = VectorXd::Zero(n_aug);
         x_aug.head(n_x) = state;
 
         // Augment the covariance matrix.
-        MatrixXd cov_aug = MatrixXd::Zero(x_aug_size, x_aug_size);
-        cov_aug.topLeftCorner(n_x, n_x) = cov;
-        cov_aug.bottomRightCorner(aug_size, aug_size) = Q;
-
+        MatrixXd P_aug = MatrixXd::Zero(n_aug, n_aug);
+        P_aug.topLeftCorner(n_x, n_x) = cov;
+        P_aug.bottomRightCorner(n_w, n_w) = Q;
         
         // STEP 2: Generate Sigma Points
-        std::vector<VectorXd> sigmaPoints = generateSigmaPoints(x_aug, cov_aug);
+        std::vector<VectorXd> sigmaPoints = generateSigmaPoints(x_aug, P_aug);
+        std::vector<double> sigmaWeights = generateSigmaWeights(n_aug);
 
         // STEP 3: Transform Sigma Points with Process Model
 
@@ -269,36 +240,29 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
             // Predict using process model
             double newX = x + dt*V*cos(psi);
             double newY = y + dt*V*sin(psi);
-            double newPsi = psi + dt*psi_dot+psi_dot_noise;
+            double newPsi = psi + dt*(psi_dot+psi_dot_noise);
             double newV = V + dt*accel_noise;
 
             VectorXd sigmaPointPredicted = Vector4d::Zero();
-            sigmaPointPredicted(0,0) = newX;
-            sigmaPointPredicted(1,0) = newY;
-            sigmaPointPredicted(2,0) = newPsi;
-            sigmaPointPredicted(3,0) = newV;
+            sigmaPointPredicted << newX, newY, newPsi, newV;
 
-            sigma_points_predict.push_back(normaliseState(sigmaPointPredicted));
+            sigma_points_predict.push_back(sigmaPointPredicted);
         }
 
         // STEP 4: Calculate the mean and covariance of transformed sigma points.
 
-        // 4a) We need the sigma weights for these calculations.
-        std::vector<double> sigmaWeights = generateSigmaWeights(x_aug_size);
-
-
-        // 4b) Calculate mean of transformed sigma points.
+        // 4a) Calculate mean of transformed sigma points.
         state = VectorXd::Zero(n_x);
-        for (int i = 0; i < sigma_points_predict.size(); i++) {
+        for (int i = 0; i < sigma_points_predict.size(); ++i) {
             state += sigmaWeights[i]*sigma_points_predict[i];
         }
 
-        // 4c) Calculate covariance of transformed sigma points.
+        // 4b) Calculate covariance of transformed sigma points.
         cov = MatrixXd::Zero(n_x, n_x);
-        for (int i = 0; i < sigma_points_predict.size(); i++) {
+        for (int i = 0; i < sigma_points_predict.size(); ++i) {
             VectorXd diff = normaliseState(sigma_points_predict[i] - state);
             cov += sigmaWeights[i]* diff * diff.transpose(); 
-        }    
+        }
 
         setState(state);
         setCovariance(cov);
@@ -307,6 +271,8 @@ void KalmanFilter::predictionStep(GyroMeasurement gyro, double dt)
 
 void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
 {
+    // All this code is the same as the LKF as the measurement model is linear
+    // so the UKF update state would just produce the same result.
     if(isInitialised())
     {
         VectorXd state = getState();
@@ -334,11 +300,6 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
     }
     else
     {
-        // You may modify this initialisation routine if you can think of a more
-        // robust and accuracy way of initialising the filter.
-        // ----------------------------------------------------------------------- //
-        // YOU ARE FREE TO MODIFY THE FOLLOWING CODE HERE
-
         VectorXd state = Vector4d::Zero();
         MatrixXd cov = Matrix4d::Zero();
 
@@ -351,8 +312,6 @@ void KalmanFilter::handleGPSMeasurement(GPSMeasurement meas)
 
         setState(state);
         setCovariance(cov);
-
-        // ----------------------------------------------------------------------- //
     }             
 }
 
